@@ -11,7 +11,7 @@
 
 (test encode-uint16
   (let* ((typ (make-uint-type 16))
-         (val (vuint #x1234))
+         (val (make-vuint #x1234))
          (bytes (encode val typ)))
     (is (= 2 (byte-array-length bytes)))
     (is (= #x34 (byte-array-ref bytes 0)))
@@ -22,11 +22,11 @@
          (bytes (make-bytes #x34 #x12))
          (val (decode bytes typ)))
     (is (typep val 'ssz::ssz-value))
-    (is (equal (ssz::vuint #x1234) val))))
+    (is (equal (ssz::make-vuint #x1234) val))))
 
 (test encode-bool
   (let* ((typ (make-bool-type))
-         (bytes (encode (vbool t) typ)))
+         (bytes (encode (make-vbool t) typ)))
     (is (= 1 (byte-array-length bytes)))
     (is (= 1 (byte-array-ref bytes 0)))))
 
@@ -34,18 +34,18 @@
   (let* ((typ (make-bool-type))
          (bytes (make-bytes 0))
          (val (decode bytes typ)))
-    (is (equal (vbool nil) val))))
+    (is (equal (make-vbool nil) val))))
 
 (test encode-bytesn
   (let* ((typ (make-bytesn-type 4))
          (bytes (make-bytes 1 2 3 4))
-         (out (encode (vbytes bytes) typ)))
+         (out (encode (make-vbytes bytes) typ)))
     (is (= 4 (byte-array-length out)))
     (is (= 3 (byte-array-ref out 2)))))
 
 (test encode-vector-fixed
   (let* ((typ (make-vector-type (make-uint-type 16) 3))
-         (val (vvector (list (vuint 1) (vuint 2) (vuint 3))))
+         (val (make-vvector (list (make-vuint 1) (make-vuint 2) (make-vuint 3))))
          (bytes (encode val typ)))
     (is (= 6 (byte-array-length bytes)))
     (is (= 1 (byte-array-ref bytes 0)))
@@ -54,7 +54,7 @@
 
 (test encode-list-fixed
   (let* ((typ (make-list-type (make-uint-type 16) 4))
-         (val (vlist (list (vuint 10) (vuint 20))))
+         (val (make-vlist (list (make-vuint 10) (make-vuint 20))))
          (bytes (encode val typ)))
     (is (= 4 (byte-array-length bytes)))
     (is (= #x0a (byte-array-ref bytes 0)))
@@ -63,8 +63,8 @@
 (test encode-vector-variable
   (let* ((elem (make-list-type (make-uint-type 16) 4))
          (typ (make-vector-type elem 2))
-         (val (vvector (list (vlist (list (vuint 1) (vuint 2)))
-                             (vlist (list (vuint 3))))))
+         (val (make-vvector (list (make-vlist (list (make-vuint 1) (make-vuint 2)))
+                             (make-vlist (list (make-vuint 3))))))
          (bytes (encode val typ)))
     (is (= 14 (byte-array-length bytes)))
     (is (= 8 (byte-array-ref bytes 0)))
@@ -79,8 +79,8 @@
   (let* ((fields (list (make-uint-type 16)
                        (make-list-type (make-uint-type 16) 4)))
          (typ (make-container-type fields))
-         (val (vcontainer (list (vuint #x0102)
-                                (vlist (list (vuint 3) (vuint 4))))))
+         (val (make-vcontainer (list (make-vuint #x0102)
+                                (make-vlist (list (make-vuint 3) (make-vuint 4))))))
          (bytes (encode val typ)))
     (is (= 10 (byte-array-length bytes)))
     (is (= #x02 (byte-array-ref bytes 0)))
@@ -96,13 +96,13 @@
          (typ (make-container-type fields))
          (bytes (make-bytes #x02 #x01 6 0 0 0 #x03 0 #x04 0))
          (val (decode bytes typ)))
-    (is (equal (vcontainer (list (vuint #x0102)
-                                 (vlist (list (vuint 3) (vuint 4)))))
+    (is (equal (make-vcontainer (list (make-vuint #x0102)
+                                 (make-vlist (list (make-vuint 3) (make-vuint 4)))))
                val))))
 
 (test encode-bitvector
   (let* ((typ (make-bitvector-type 10))
-         (val (vbitvector (list t nil t nil nil nil t nil nil t)))
+         (val (make-vbitvector (list t nil t nil nil nil t nil nil t)))
          (bytes (encode val typ)))
     (is (= 2 (byte-array-length bytes)))
     (is (= #b01000101 (byte-array-ref bytes 0)))
@@ -112,11 +112,11 @@
   (let* ((typ (make-bitvector-type 5))
          (bytes (make-bytes #b00010101))
          (val (decode bytes typ)))
-    (is (equal (vbitvector (list t nil t nil t)) val))))
+    (is (equal (make-vbitvector (list t nil t nil t)) val))))
 
 (test encode-bitlist
   (let* ((typ (make-bitlist-type 6))
-         (val (vbitlist (list t nil t)))
+         (val (make-vbitlist (list t nil t)))
          (bytes (encode val typ)))
     (is (= 1 (byte-array-length bytes)))
     (is (= #b00001101 (byte-array-ref bytes 0)))))
@@ -125,7 +125,7 @@
   (let* ((typ (make-bitlist-type 6))
          (bytes (make-bytes #b00001101))
          (val (decode bytes typ)))
-    (is (equal (vbitlist (list t nil t)) val))))
+    (is (equal (make-vbitlist (list t nil t)) val))))
 
 (test encode-union-none
   (let* ((typ (make-union-type (list (make-none-type) (make-uint-type 16))))
@@ -142,7 +142,7 @@
 
 (test encode-union-value
   (let* ((typ (make-union-type (list (make-none-type) (make-uint-type 16))))
-         (val (vunion 1 (vuint #x1234)))
+         (val (vunion 1 (make-vuint #x1234)))
          (bytes (encode val typ)))
     (is (= 3 (byte-array-length bytes)))
     (is (= 1 (byte-array-ref bytes 0)))
@@ -153,11 +153,11 @@
   (let* ((typ (make-union-type (list (make-none-type) (make-uint-type 16))))
          (bytes (make-bytes 1 #x34 #x12))
          (val (decode bytes typ)))
-    (is (equal (vunion 1 (vuint #x1234)) val))))
+    (is (equal (vunion 1 (make-vuint #x1234)) val))))
 
 (test encode-progressive-list
   (let* ((typ (make-progressive-list-type (make-uint-type 16)))
-         (val (vlist (list (vuint 1) (vuint 2))))
+         (val (make-vlist (list (make-vuint 1) (make-vuint 2))))
          (bytes (encode val typ)))
     (is (= 4 (byte-array-length bytes)))
     (is (= 1 (byte-array-ref bytes 0)))
@@ -167,4 +167,4 @@
   (let* ((typ (make-progressive-bitlist-type))
          (bytes (make-bytes #b00001101))
          (val (decode bytes typ)))
-    (is (equal (vbitlist (list t nil t)) val))))
+    (is (equal (make-vbitlist (list t nil t)) val))))

@@ -7,6 +7,7 @@
   (uiop:getenv "SSZ_GENERIC_DIR"))
 
 (defparameter *ssz-generic-schema* nil)
+(defparameter *ssz-generic-type-cache* (make-hash-table :test 'equal))
 
 (defun %string-prefix-p (prefix s)
   (and (<= (length prefix) (length s))
@@ -26,7 +27,7 @@
 (defun %hex-digit (ch)
   (or (digit-char-p ch)
       (let ((uc (char-upcase ch)))
-        (cond ((and (>= uc #\A) (<= uc #\F))
+        (cond ((and (char>= uc #\A) (char<= uc #\F))
                (+ 10 (- (char-code uc) (char-code #\A))))
               (t nil)))))
 
@@ -117,7 +118,70 @@
     (push (subseq s start) parts)
     (nreverse parts)))
 
-(defun %parse-type-desc (s)
+(defun %schema-containers ()
+  (let* ((schema (%mapping->hash *ssz-generic-schema*))
+         (containers (gethash "containers" schema)))
+    (and containers (%mapping->hash containers))))
+
+(defun %schema-progressive-containers ()
+  (let* ((schema (%mapping->hash *ssz-generic-schema*))
+         (containers (gethash "progressive_containers" schema)))
+    (and containers (%mapping->hash containers))))
+
+(defun %resolve-container-desc (name containers &optional progressive-containers)
+  (let ((key (%normalize-key name)))
+    (or (gethash key *ssz-generic-type-cache*)
+        (let ((entry (gethash key containers)))
+          (when entry
+            (setf (gethash key *ssz-generic-type-cache*) :in-progress)
+            (let* ((fields-raw (%yaml->list entry))
+                   (fields
+                    (mapcar
+                     (lambda (field)
+                       (let* ((fmap (%mapping->hash field))
+                              (fname (or (gethash "name" fmap) (car field)))
+                              (type-str (or (gethash "type" fmap) (cdr field)))
+                              (desc (%parse-type-desc type-str containers progressive-containers)))
+                         (cons fname desc)))
+                     fields-raw))
+                   (types (mapcar (lambda (f) (getf (cdr f) :ssz-type)) fields))
+                   (desc (list :kind :container
+                               :fields fields
+                               :ssz-type (ssz:make-container-type types))))
+              (setf (gethash key *ssz-generic-type-cache*) desc)
+              desc))))))
+
+(defun %resolve-progressive-container-desc (name containers progressive-containers)
+  (let ((key (%normalize-key name)))
+    (or (gethash key *ssz-generic-type-cache*)
+        (let ((entry (gethash key progressive-containers)))
+          (when entry
+            (setf (gethash key *ssz-generic-type-cache*) :in-progress)
+            (let* ((entry-map (%mapping->hash entry))
+                   (active-raw (or (gethash "active_fields" entry-map)
+                                   (gethash "active-fields" entry-map)))
+                   (fields-raw (or (gethash "fields" entry-map) entry))
+                   (active-fields
+                    (mapcar (lambda (v) (not (zerop (%parse-integer-value v))))
+                            (%yaml->list active-raw)))
+                   (fields
+                    (mapcar
+                     (lambda (field)
+                       (let* ((fmap (%mapping->hash field))
+                              (fname (or (gethash "name" fmap) (car field)))
+                              (type-str (or (gethash "type" fmap) (cdr field)))
+                              (desc (%parse-type-desc type-str containers progressive-containers)))
+                         (cons fname desc)))
+                     (%yaml->list fields-raw)))
+                   (types (mapcar (lambda (f) (getf (cdr f) :ssz-type)) fields))
+                   (desc (list :kind :progcontainer
+                               :fields fields
+                               :active-fields active-fields
+                               :ssz-type (ssz:make-progressive-container-type types active-fields))))
+              (setf (gethash key *ssz-generic-type-cache*) desc)
+              desc))))))
+
+(defun %parse-type-desc (s &optional containers progressive-containers)
   (let* ((raw (string-trim " " (string-downcase s))))
     (cond
       ((string= raw "bool")
@@ -147,7 +211,9 @@
               (parts (%parse-top-level inner #\,)))
          (unless (= (length parts) 2)
            (error "invalid list/vector type: ~a" s))
-         (let* ((elem-desc (%parse-type-desc (string-trim " " (first parts))))
+         (let* ((elem-desc (%parse-type-desc (string-trim " " (first parts))
+                                             containers
+                                             progressive-containers))
                 (len (parse-integer (string-trim " " (second parts)))))
            (if is-list
                (list :kind :list :elem elem-desc :max-len len
@@ -163,10 +229,19 @@
                                      (length "progressivelist[")
                                      (length "progressive_list["))
                              (1- (length raw))))
-              (elem-desc (%parse-type-desc (string-trim " " inner))))
+              (elem-desc (%parse-type-desc (string-trim " " inner) containers progressive-containers)))
          (list :kind :proglist :elem elem-desc
                :ssz-type (ssz:make-progressive-list-type (getf elem-desc :ssz-type)))))
-      (t (error "unknown type: ~a" s)))))
+      (t
+       (when containers
+         (let ((resolved (%resolve-container-desc raw containers progressive-containers)))
+           (when resolved
+             (return-from %parse-type-desc resolved))))
+       (when progressive-containers
+         (let ((resolved (%resolve-progressive-container-desc raw containers progressive-containers)))
+           (when resolved
+             (return-from %parse-type-desc resolved))))
+       (error "unknown type: ~a" s)))))
 
 (defun %yaml->bool (v)
   (cond ((eq v t) t)
@@ -197,35 +272,47 @@
 
 (defun %yaml->ssz (desc yaml-value)
   (case (getf desc :kind)
-    (:bool (ssz:vbool (%yaml->bool yaml-value)))
-    (:uint (ssz:vuint (%parse-integer-value yaml-value)))
-    (:byte (ssz:vbyte (%parse-integer-value yaml-value)))
-    (:bytesn (ssz:vbytes (%parse-hex-bytes yaml-value)))
+    (:bool (ssz:make-vbool (%yaml->bool yaml-value)))
+    (:uint (ssz:make-vuint (%parse-integer-value yaml-value)))
+    (:byte (ssz:make-vbyte (%parse-integer-value yaml-value)))
+    (:bytesn (ssz:make-vbytes (%parse-hex-bytes yaml-value)))
     (:bitvector
      (let* ((bytes (%parse-hex-bytes yaml-value))
             (bits (%unpack-bitvector bytes (getf desc :bits))))
-       (ssz:vbitvector bits)))
+       (ssz:make-vbitvector bits)))
     (:bitlist
      (let* ((bytes (%parse-hex-bytes yaml-value))
             (bits (%unpack-bitlist bytes (getf desc :max-bits))))
-       (ssz:vbitlist bits)))
+       (ssz:make-vbitlist bits)))
     (:vector
      (let ((items (%yaml->list yaml-value)))
-       (ssz:vvector (mapcar (lambda (v) (%yaml->ssz (getf desc :elem) v)) items))))
+       (ssz:make-vvector (mapcar (lambda (v) (%yaml->ssz (getf desc :elem) v)) items))))
     (:list
      (let ((items (%yaml->list yaml-value)))
-       (ssz:vlist (mapcar (lambda (v) (%yaml->ssz (getf desc :elem) v)) items))))
+       (ssz:make-vlist (mapcar (lambda (v) (%yaml->ssz (getf desc :elem) v)) items))))
     (:proglist
      (let ((items (%yaml->list yaml-value)))
-       (ssz:vlist (mapcar (lambda (v) (%yaml->ssz (getf desc :elem) v)) items))))
+       (ssz:make-vlist (mapcar (lambda (v) (%yaml->ssz (getf desc :elem) v)) items))))
     (:progbitlist
      (let* ((bytes (%parse-hex-bytes yaml-value))
             (bits (%unpack-bitlist bytes (* (length bytes) 8))))
-       (ssz:vbitlist bits)))
+       (ssz:make-vbitlist bits)))
     (:container
      (let* ((fields (getf desc :fields))
             (mapping (%mapping->hash yaml-value)))
-       (ssz:vcontainer
+       (ssz:make-vcontainer
+        (mapcar (lambda (field)
+                  (let* ((name (car field))
+                         (fdesc (cdr field))
+                         (value (gethash (%normalize-key name) mapping)))
+                    (when (null value)
+                      (error "missing field in value.yaml: ~a" name))
+                    (%yaml->ssz fdesc value)))
+                fields))))
+    (:progcontainer
+     (let* ((fields (getf desc :fields))
+            (mapping (%mapping->hash yaml-value)))
+       (ssz:make-vcontainer
         (mapcar (lambda (field)
                   (let* ((name (car field))
                          (fdesc (cdr field))
@@ -258,8 +345,24 @@
     (when (and sym (fboundp sym))
       (funcall (symbol-function sym) bytes))))
 
+(defun %read-file-bytes (path)
+  (with-open-file (in path :element-type '(unsigned-byte 8))
+    (let ((len (file-length in)))
+      (if len
+          (let ((bytes (make-array len :element-type '(unsigned-byte 8))))
+            (read-sequence bytes in)
+            bytes)
+          (let ((out (make-array 0 :element-type '(unsigned-byte 8) :adjustable t :fill-pointer 0))
+                (buf (make-array 4096 :element-type '(unsigned-byte 8))))
+            (loop for count = (read-sequence buf in)
+                  while (> count 0) do
+                    (let ((start (fill-pointer out)))
+                      (adjust-array out (+ start count))
+                      (replace out buf :start1 start :end2 count)))
+            out)))))
+
 (defun %read-serialized (path)
-  (let* ((bytes (uiop:read-file-byte-vector path))
+  (let* ((bytes (%read-file-bytes path))
          (decoded (%maybe-snappy-decompress bytes)))
     (if decoded
         decoded
@@ -315,27 +418,18 @@
      (when *ssz-generic-schema*
        (let* ((base (let ((pos (position #\_ case-name)))
                       (if pos (subseq case-name 0 pos) case-name)))
-              (schema (%mapping->hash *ssz-generic-schema*))
-              (containers (gethash "containers" schema)))
+              (containers (%schema-containers)))
          (when containers
-           (let* ((cmap (%mapping->hash containers))
-                  (entry (gethash (%normalize-key base) cmap)))
-             (when entry
-               (let* ((fields-raw (%yaml->list entry))
-                      (fields
-                        (mapcar
-                         (lambda (field)
-                           (let* ((fmap (%mapping->hash field))
-                                  (name (or (gethash "name" fmap) (car field)))
-                                  (type-str (or (gethash "type" fmap) (cdr field)))
-                                  (desc (%parse-type-desc type-str)))
-                             (cons name desc)))
-                         fields-raw))
-                      (types (mapcar (lambda (f) (getf (cdr f) :ssz-type)) fields)))
-                 (list :kind :container
-                       :fields fields
-                       :ssz-type (ssz:make-container-type types))))))))))
-    (t nil)))
+           (%resolve-container-desc base containers (%schema-progressive-containers))))))
+    ((string= category "progressive_containers")
+     (when *ssz-generic-schema*
+       (let* ((base (let ((pos (position #\_ case-name)))
+                      (if pos (subseq case-name 0 pos) case-name)))
+              (containers (%schema-containers))
+              (progressive (%schema-progressive-containers)))
+         (when progressive
+           (%resolve-progressive-container-desc base containers progressive))))))
+    (t nil))
 
 (defun %collect-cases (root category)
   (let* ((valid-dir (merge-pathnames (format nil "~a/valid/" category) root))
@@ -386,7 +480,7 @@
   (let ((categories (append
                      '("boolean" "uints" "bitvector" "bitlist" "basic_vector"
                        "basic_progressive_list" "progressive_bitlist")
-                     (when *ssz-generic-schema* '("containers")))))
+                     (when *ssz-generic-schema* '("containers" "progressive_containers")))))
     (dolist (category categories)
       (dolist (case-dir (%collect-cases root category))
         (%run-case case-dir category)))))
@@ -396,7 +490,7 @@
   (let ((categories (append
                      '("boolean" "uints" "bitvector" "bitlist" "basic_vector"
                        "basic_progressive_list" "progressive_bitlist")
-                     (when *ssz-generic-schema* '("containers")))))
+                     (when *ssz-generic-schema* '("containers" "progressive_containers")))))
     (dolist (category categories)
       (dolist (case-dir (%collect-invalid root category))
         (%run-invalid case-dir category)))))

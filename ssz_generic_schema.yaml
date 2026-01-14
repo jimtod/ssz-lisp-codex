@@ -1,0 +1,122 @@
+containers:
+  SingleFieldTestStruct:
+    - name: A
+      type: byte
+  SmallTestStruct:
+    - name: A
+      type: uint16
+    - name: B
+      type: uint16
+  FixedTestStruct:
+    - name: A
+      type: uint8
+    - name: B
+      type: uint64
+    - name: C
+      type: uint32
+  VarTestStruct:
+    - name: A
+      type: uint16
+    - name: B
+      type: list[uint16, 1024]
+    - name: C
+      type: uint8
+  ComplexTestStruct:
+    - name: A
+      type: uint16
+    - name: B
+      type: list[uint16, 128]
+    - name: C
+      type: uint8
+    - name: D
+      type: list[byte, 256]
+    - name: E
+      type: VarTestStruct
+    - name: F
+      type: vector[FixedTestStruct, 4]
+    - name: G
+      type: vector[VarTestStruct, 2]
+  ProgressiveTestStruct:
+    - name: A
+      type: progressivelist[byte]
+    - name: B
+      type: progressivelist[uint64]
+    - name: C
+      type: progressivelist[SmallTestStruct]
+    - name: D
+      type: progressivelist[progressivelist[VarTestStruct]]
+  BitsStruct:
+    - name: A
+      type: bitlist[5]
+    - name: B
+      type: bitvector[2]
+    - name: C
+      type: bitvector[1]
+    - name: D
+      type: bitlist[6]
+    - name: E
+      type: bitvector[8]
+  ProgressiveBitsStruct:
+    - name: A
+      type: bitvector[256]
+    - name: B
+      type: bitlist[256]
+    - name: C
+      type: progressivebitlist
+    - name: D
+      type: bitvector[257]
+    - name: E
+      type: bitlist[257]
+    - name: F
+      type: progressivebitlist
+    - name: G
+      type: bitvector[1280]
+    - name: H
+      type: bitlist[1280]
+    - name: I
+      type: progressivebitlist
+    - name: J
+      type: bitvector[1281]
+    - name: K
+      type: bitlist[1281]
+    - name: L
+      type: progressivebitlist
+progressive_containers:
+  ProgressiveSingleFieldContainerTestStruct:
+    active_fields: [1]
+    fields:
+      - name: A
+        type: byte
+  ProgressiveSingleListContainerTestStruct:
+    active_fields: [0, 0, 0, 0, 1]
+    fields:
+      - name: C
+        type: progressivebitlist
+  ProgressiveVarTestStruct:
+    active_fields: [1, 0, 1, 0, 1]
+    fields:
+      - name: A
+        type: byte
+      - name: B
+        type: list[uint16, 123]
+      - name: C
+        type: progressivebitlist
+  ProgressiveComplexTestStruct:
+    active_fields: [1, 0, 1, 0, 1, 0, 0, 0, 1, 0, 0, 0, 1, 1, 0, 0, 0, 0, 0, 0, 1, 1]
+    fields:
+      - name: A
+        type: byte
+      - name: B
+        type: list[uint16, 123]
+      - name: C
+        type: progressivebitlist
+      - name: D
+        type: progressivelist[uint64]
+      - name: E
+        type: progressivelist[SmallTestStruct]
+      - name: F
+        type: progressivelist[progressivelist[VarTestStruct]]
+      - name: G
+        type: list[ProgressiveSingleFieldContainerTestStruct, 10]
+      - name: H
+        type: progressivelist[ProgressiveVarTestStruct]
