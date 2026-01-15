@@ -1,0 +1,15 @@
+[submodule "consensus-spec-tests"]
+	path = consensus-spec-tests
+	url = https://github.com/ethereum/consensus-spec-tests
+[submodule "consensus-specs"]
+	path = consensus-specs
+	url = https://github.com/ethereum/consensus-specs
+[submodule "ethereum_ssz"]
+	path = ethereum_ssz
+	url = https://github.com/sigp/ethereum_ssz.git
+[submodule "fastssz"]
+	path = fastssz
+	url = https://github.com/ferranbt/fastssz.git
+[submodule "py-ssz"]
+	path = py-ssz
+	url = https://github.com/ethereum/py-ssz
