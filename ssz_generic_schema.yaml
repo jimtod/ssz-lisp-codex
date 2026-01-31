@@ -120,3 +120,14 @@ progressive_containers:
         type: list[ProgressiveSingleFieldContainerTestStruct, 10]
       - name: H
         type: progressivelist[ProgressiveVarTestStruct]
+compatible_unions:
+  CompatibleUnionA:
+    1: ProgressiveSingleFieldContainerTestStruct
+  CompatibleUnionBC:
+    2: ProgressiveSingleListContainerTestStruct
+    3: ProgressiveVarTestStruct
+  CompatibleUnionABCA:
+    1: ProgressiveSingleFieldContainerTestStruct
+    2: ProgressiveSingleListContainerTestStruct
+    3: ProgressiveVarTestStruct
+    4: ProgressiveSingleFieldContainerTestStruct

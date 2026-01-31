@@ -8,6 +8,46 @@
 
 (defparameter *ssz-generic-schema* nil)
 (defparameter *ssz-generic-type-cache* (make-hash-table :test 'equal))
+(defparameter *ssz-generic-assert* nil)
+(defparameter *ssz-generic-expect-error* nil)
+(defparameter *ssz-generic-skip* nil)
+
+(defun %fiveam-assert (ok &optional msg)
+  (if msg
+      (fiveam:is (not (null ok)) msg)
+      (fiveam:is (not (null ok)))))
+
+(defun %fiveam-expect-error (thunk &optional msg)
+  (declare (ignore msg))
+  (fiveam:signals error
+    (funcall thunk)))
+
+(defun %fiveam-skip (msg)
+  (fiveam:skip msg))
+
+(setf *ssz-generic-assert* #'%fiveam-assert)
+(setf *ssz-generic-expect-error* #'%fiveam-expect-error)
+(setf *ssz-generic-skip* #'%fiveam-skip)
+
+(defun %assert (ok &optional msg)
+  (if *ssz-generic-assert*
+      (funcall *ssz-generic-assert* ok msg)
+      (unless ok
+        (error (or msg "assertion failed")))))
+
+(defun %expect-error (thunk &optional msg)
+  (if *ssz-generic-expect-error*
+      (funcall *ssz-generic-expect-error* thunk msg)
+      (handler-case
+          (progn
+            (funcall thunk)
+            (error (or msg "expected error")))
+        (error () t))))
+
+(defun %skip (msg)
+  (if *ssz-generic-skip*
+      (funcall *ssz-generic-skip* msg)
+      (format *error-output* "skip: ~a~%" msg)))
 
 (defun %string-prefix-p (prefix s)
   (and (<= (length prefix) (length s))
@@ -71,8 +111,15 @@
 
 (defun %load-schema ()
   (when (null *ssz-generic-schema*)
-    (let ((path (uiop:getenv "SSZ_GENERIC_SCHEMA")))
-      (when (and path (not (string= path "")) (probe-file path))
+    (let* ((env-path (uiop:getenv "SSZ_GENERIC_SCHEMA"))
+           (sys-root (ignore-errors (asdf:system-source-directory "ssz-lisp")))
+           (default-path (merge-pathnames "ssz_generic_schema.yaml"
+                                          (or sys-root (uiop:getcwd))))
+           (path (cond
+                   ((and env-path (not (string= env-path ""))) env-path)
+                   ((probe-file default-path) default-path)
+                   (t nil))))
+      (when (and path (probe-file path))
         (setf *ssz-generic-schema* (%yaml-parse-file path))))))
 
 (defun %yaml->list (v)
@@ -128,6 +175,11 @@
          (containers (gethash "progressive_containers" schema)))
     (and containers (%mapping->hash containers))))
 
+(defun %schema-compatible-unions ()
+  (let* ((schema (%mapping->hash *ssz-generic-schema*))
+         (entries (gethash "compatible_unions" schema)))
+    (and entries (%mapping->hash entries))))
+
 (defun %resolve-container-desc (name containers &optional progressive-containers)
   (let ((key (%normalize-key name)))
     (or (gethash key *ssz-generic-type-cache*)
@@ -181,6 +233,54 @@
               (setf (gethash key *ssz-generic-type-cache*) desc)
               desc))))))
 
+(defun %resolve-compatible-union-desc (name unions containers progressive-containers)
+  (let ((key (%normalize-key name)))
+    (or (gethash key *ssz-generic-type-cache*)
+        (let ((entry (gethash key unions)))
+          (when entry
+            (setf (gethash key *ssz-generic-type-cache*) :in-progress)
+            (let ((selectors nil)
+                  (type-descs nil))
+              (cond
+                ((or (hash-table-p entry)
+                     (and (listp entry)
+                          (or (and (keywordp (first entry)) (evenp (length entry)))
+                              (and (every #'consp entry)
+                                   (let ((k (caar entry)))
+                                     (or (keywordp k) (symbolp k) (stringp k)))))))
+                 (let ((mapping (%mapping->hash entry)))
+                   (maphash
+                    (lambda (k v)
+                      (let* ((selector (%parse-integer-value k))
+                             (desc (%parse-type-desc v containers progressive-containers)))
+                        (push selector selectors)
+                        (push desc type-descs)))
+                    mapping)))
+                ((listp entry)
+                 (dolist (item entry)
+                   (let* ((imap (%mapping->hash item))
+                          (sel-raw (or (gethash "selector" imap) (gethash "index" imap)))
+                          (type-str (or (gethash "type" imap) (gethash "value" imap))))
+                     (when (null sel-raw)
+                       (error "compatible_union entry missing selector: ~a" item))
+                     (when (null type-str)
+                       (error "compatible_union entry missing type: ~a" item))
+                     (let* ((selector (%parse-integer-value sel-raw))
+                            (desc (%parse-type-desc type-str containers progressive-containers)))
+                       (push selector selectors)
+                       (push desc type-descs)))))
+                (t
+                 (error "invalid compatible_union entry: ~a" entry)))
+              (let* ((selectors (reverse selectors))
+                     (type-descs (reverse type-descs))
+                     (types (mapcar (lambda (d) (getf d :ssz-type)) type-descs))
+                     (desc (list :kind :compat-union
+                                 :selectors selectors
+                                 :types type-descs
+                                 :ssz-type (ssz:make-compatible-union-type-from selectors types))))
+                (setf (gethash key *ssz-generic-type-cache*) desc)
+                desc)))))))
+
 (defun %parse-type-desc (s &optional containers progressive-containers)
   (let* ((raw (string-trim " " (string-downcase s))))
     (cond
@@ -188,6 +288,8 @@
        (list :kind :bool :ssz-type (ssz:make-bool-type)))
       ((string= raw "byte")
        (list :kind :byte :ssz-type (ssz:make-byte-type)))
+      ((string= raw "none")
+       (list :kind :none :ssz-type (ssz:make-none-type)))
       ((%string-prefix-p "uint" raw)
        (multiple-value-bind (bits _) (%parse-uint-bits raw "uint")
          (declare (ignore _))
@@ -232,6 +334,63 @@
               (elem-desc (%parse-type-desc (string-trim " " inner) containers progressive-containers)))
          (list :kind :proglist :elem elem-desc
                :ssz-type (ssz:make-progressive-list-type (getf elem-desc :ssz-type)))))
+      ((%string-prefix-p "union[" raw)
+       (let* ((inner (subseq raw (length "union[") (1- (length raw))))
+              (parts (%parse-top-level inner #\,)))
+         (when (= (length parts) 0)
+           (error "invalid union type: ~a" s))
+         (let ((type-descs nil)
+               (variants nil))
+           (dolist (part parts)
+             (let* ((trimmed (string-trim " " part))
+                    (split (%parse-top-level trimmed #\:)))
+               (cond
+                 ((= (length split) 2)
+                  (let* ((name (string-trim " " (first split)))
+                         (type-str (string-trim " " (second split)))
+                         (desc (%parse-type-desc type-str containers progressive-containers)))
+                    (push desc type-descs)
+                    (push (cons name desc) variants)))
+                 ((= (length split) 1)
+                  (let ((desc (%parse-type-desc trimmed containers progressive-containers)))
+                    (push desc type-descs)
+                    (push (cons nil desc) variants)))
+                 (t
+                  (error "invalid union entry: ~a" part)))))
+           (let* ((type-descs (nreverse type-descs))
+                  (variants (nreverse variants))
+                  (types (mapcar (lambda (d) (getf d :ssz-type)) type-descs)))
+             (list :kind :union :types type-descs :variants variants
+                   :ssz-type (ssz:make-union-type types))))))
+      ((or (%string-prefix-p "compatible_union[" raw)
+           (%string-prefix-p "compatibleunion[" raw))
+       (let* ((inner (subseq raw (if (%string-prefix-p "compatible_union[" raw)
+                                     (length "compatible_union[")
+                                     (length "compatibleunion["))
+                             (1- (length raw))))
+              (parts (%parse-top-level inner #\,)))
+         (when (= (length parts) 0)
+           (error "invalid compatible_union type: ~a" s))
+         (let ((selectors nil)
+               (type-descs nil))
+           (dolist (part parts)
+             (let* ((trimmed (string-trim " " part))
+                    (split (%parse-top-level trimmed #\:)))
+               (unless (= (length split) 2)
+                 (error "invalid compatible_union entry: ~a" part))
+               (let* ((sel-str (string-trim " " (first split)))
+                      (type-str (string-trim " " (second split)))
+                      (selector (%parse-integer-value sel-str))
+                      (desc (%parse-type-desc type-str containers progressive-containers)))
+                 (push selector selectors)
+                 (push desc type-descs))))
+           (let* ((selectors (reverse selectors))
+                  (type-descs (reverse type-descs))
+                  (types (mapcar (lambda (d) (getf d :ssz-type)) type-descs)))
+             (list :kind :compat-union
+                   :selectors selectors
+                   :types type-descs
+                   :ssz-type (ssz:make-compatible-union-type-from selectors types))))))
       (t
        (when containers
          (let ((resolved (%resolve-container-desc raw containers progressive-containers)))
@@ -321,6 +480,134 @@
                       (error "missing field in value.yaml: ~a" name))
                     (%yaml->ssz fdesc value)))
                 fields))))
+    (:union
+     (let* ((types (getf desc :types))
+            (variants (getf desc :variants))
+            (selector-raw nil)
+            (payload-raw nil))
+       (let ((name->index (make-hash-table :test 'equal)))
+         (loop for idx from 0
+               for variant in variants do
+                 (let ((name (car variant)))
+                   (when name
+                     (setf (gethash (%normalize-key name) name->index) idx))))
+         (flet ((select-from-mapping (mapping)
+                  (setf selector-raw (or (gethash "selector" mapping)
+                                         (gethash "index" mapping)
+                                         (gethash "type" mapping)))
+                  (setf payload-raw (or (gethash "value" mapping)
+                                        (gethash "data" mapping)
+                                        (gethash "payload" mapping)))
+                  (when (null selector-raw)
+                    (let ((matched nil))
+                      (maphash (lambda (k v)
+                                 (when (gethash k name->index)
+                                   (if matched
+                                       (error "ambiguous union mapping: ~a" yaml-value)
+                                       (setf matched (cons k v)))))
+                               mapping)
+                      (when matched
+                        (setf selector-raw (car matched))
+                        (setf payload-raw (cdr matched)))))))
+           (cond
+             ((hash-table-p yaml-value)
+              (select-from-mapping (%mapping->hash yaml-value)))
+             ((and (listp yaml-value)
+                   (or (and (keywordp (first yaml-value)) (evenp (length yaml-value)))
+                       (and (every #'consp yaml-value)
+                            (let ((k (caar yaml-value)))
+                              (or (keywordp k) (symbolp k) (stringp k))))))
+              (select-from-mapping (%mapping->hash yaml-value)))
+             ((or (listp yaml-value) (vectorp yaml-value))
+              (let ((items (%yaml->list yaml-value)))
+                (when (>= (length items) 1)
+                  (setf selector-raw (first items)))
+                (when (>= (length items) 2)
+                  (setf payload-raw (second items)))))
+             (t
+              (setf selector-raw yaml-value))))
+         (when (null selector-raw)
+           (error "union value missing selector: ~a" yaml-value))
+         (let* ((selector
+                 (handler-case
+                     (%parse-integer-value selector-raw)
+                   (error ()
+                     (let* ((name (cond
+                                    ((stringp selector-raw) selector-raw)
+                                    ((symbolp selector-raw) (symbol-name selector-raw))
+                                    (t (princ-to-string selector-raw))))
+                            (idx (gethash (%normalize-key name) name->index)))
+                       (when (null idx)
+                         (error "unknown union selector name: ~a" selector-raw))
+                       idx))))
+                (index selector)
+                (type-count (length types)))
+           (when (or (< index 0) (>= index type-count))
+             (error "union selector out of bounds: ~a" selector))
+           (let ((selected (nth index types)))
+             (case (getf selected :kind)
+               (:none
+                (ssz:vunion-none selector))
+               (t
+                (when (null payload-raw)
+                  (error "union selector ~a missing value" selector))
+                (ssz:vunion selector (%yaml->ssz selected payload-raw)))))))))
+    (:compat-union
+     (let* ((selectors (getf desc :selectors))
+            (types (getf desc :types))
+            (selector-raw nil)
+            (payload-raw nil))
+       (flet ((select-from-mapping (mapping)
+                (setf selector-raw (or (gethash "selector" mapping)
+                                       (gethash "index" mapping)
+                                       (gethash "type" mapping)))
+                (setf payload-raw (or (gethash "value" mapping)
+                                      (gethash "data" mapping)
+                                      (gethash "payload" mapping)))
+                (when (null selector-raw)
+                  (let ((matched nil))
+                    (maphash (lambda (k v)
+                               (handler-case
+                                   (when (find (%parse-integer-value k) selectors)
+                                     (if matched
+                                         (error "ambiguous compatible_union mapping: ~a" yaml-value)
+                                         (setf matched (cons k v))))
+                                 (error () nil)))
+                             mapping)
+                    (when matched
+                      (setf selector-raw (car matched))
+                      (setf payload-raw (cdr matched)))))))
+         (cond
+           ((hash-table-p yaml-value)
+            (select-from-mapping (%mapping->hash yaml-value)))
+           ((and (listp yaml-value)
+                 (or (and (keywordp (first yaml-value)) (evenp (length yaml-value)))
+                     (and (every #'consp yaml-value)
+                          (let ((k (caar yaml-value)))
+                            (or (keywordp k) (symbolp k) (stringp k))))))
+            (select-from-mapping (%mapping->hash yaml-value)))
+           ((or (listp yaml-value) (vectorp yaml-value))
+            (let ((items (%yaml->list yaml-value)))
+              (when (>= (length items) 1)
+                (setf selector-raw (first items)))
+              (when (>= (length items) 2)
+                (setf payload-raw (second items)))))
+           (t
+            (setf selector-raw yaml-value))))
+       (when (null selector-raw)
+         (error "compatible_union value missing selector: ~a" yaml-value))
+       (let* ((selector (%parse-integer-value selector-raw))
+              (index (position selector selectors)))
+         (when (null index)
+           (error "compatible_union selector not found: ~a" selector))
+         (let ((selected (nth index types)))
+           (case (getf selected :kind)
+             (:none
+              (ssz:vunion-none selector))
+             (t
+              (when (null payload-raw)
+                (error "compatible_union selector ~a missing value" selector))
+              (ssz:vunion selector (%yaml->ssz selected payload-raw))))))))
     (t (error "yaml conversion not implemented for kind: ~a" (getf desc :kind)))))
 
 (defun %read-root (path)
@@ -367,7 +654,7 @@
     (if decoded
         decoded
         (progn
-          (fiveam:skip "snappy not available; skipping serialized compare")
+          (%skip "snappy not available; skipping serialized compare")
           nil))))
 
 (defun %bytes= (a b)
@@ -427,9 +714,18 @@
                       (if pos (subseq case-name 0 pos) case-name)))
               (containers (%schema-containers))
               (progressive (%schema-progressive-containers)))
-         (when progressive
-           (%resolve-progressive-container-desc base containers progressive))))))
-    (t nil))
+        (when progressive
+          (%resolve-progressive-container-desc base containers progressive)))))
+    ((string= category "compatible_unions")
+     (when *ssz-generic-schema*
+       (let* ((base (let ((pos (position #\_ case-name)))
+                      (if pos (subseq case-name 0 pos) case-name)))
+              (containers (%schema-containers))
+              (progressive (%schema-progressive-containers))
+              (unions (%schema-compatible-unions)))
+         (when unions
+           (%resolve-compatible-union-desc base unions containers progressive)))))
+    (t nil)))
 
 (defun %collect-cases (root category)
   (let* ((valid-dir (merge-pathnames (format nil "~a/valid/" category) root))
@@ -445,7 +741,7 @@
   (let* ((case-name (car (last (pathname-directory case-dir))))
          (desc (%case-type category case-name)))
     (when (null desc)
-      (fiveam:skip (format nil "unsupported case name: ~a" case-name)))
+      (%skip (format nil "unsupported case name: ~a" case-name)))
     (let* ((value-path (merge-pathnames "value.yaml" case-dir))
            (meta-path (merge-pathnames "meta.yaml" case-dir))
            (serialized-path (merge-pathnames "serialized.ssz_snappy" case-dir))
@@ -454,33 +750,33 @@
            (type (getf desc :ssz-type))
            (root (%read-root meta-path))
            (computed (ssz:hash-tree-root value type)))
-      (fiveam:is (%bytes= computed root))
+      (%assert (%bytes= computed root) "hash_tree_root mismatch")
       (when (probe-file serialized-path)
         (let ((serialized (%read-serialized serialized-path)))
           (when serialized
             (let ((encoded (ssz:encode value type)))
-              (fiveam:is (%bytes= encoded serialized)))))))))
+              (%assert (%bytes= encoded serialized) "serialized mismatch"))))))))
 
 (defun %run-invalid (case-dir category)
   (let* ((case-name (car (last (pathname-directory case-dir))))
          (desc (%case-type category case-name)))
     (when (null desc)
-      (fiveam:skip (format nil "unsupported invalid case name: ~a" case-name)))
+      (%skip (format nil "unsupported invalid case name: ~a" case-name)))
     (let* ((serialized-path (merge-pathnames "serialized.ssz_snappy" case-dir))
            (type (getf desc :ssz-type)))
       (unless (probe-file serialized-path)
-        (fiveam:skip (format nil "missing serialized.ssz_snappy: ~a" case-name)))
+        (%skip (format nil "missing serialized.ssz_snappy: ~a" case-name)))
       (let ((serialized (%read-serialized serialized-path)))
         (when serialized
-          (fiveam:signals error
-            (ssz:decode serialized type)))))))
+          (%expect-error (lambda () (ssz:decode serialized type))
+                         "expected decode error"))))))
 
 (defun run-ssz-generic (root)
   (%load-schema)
   (let ((categories (append
                      '("boolean" "uints" "bitvector" "bitlist" "basic_vector"
                        "basic_progressive_list" "progressive_bitlist")
-                     (when *ssz-generic-schema* '("containers" "progressive_containers")))))
+                     (when *ssz-generic-schema* '("containers" "progressive_containers" "compatible_unions")))))
     (dolist (category categories)
       (dolist (case-dir (%collect-cases root category))
         (%run-case case-dir category)))))
@@ -490,7 +786,7 @@
   (let ((categories (append
                      '("boolean" "uints" "bitvector" "bitlist" "basic_vector"
                        "basic_progressive_list" "progressive_bitlist")
-                     (when *ssz-generic-schema* '("containers" "progressive_containers")))))
+                     (when *ssz-generic-schema* '("containers" "progressive_containers" "compatible_unions")))))
     (dolist (category categories)
       (dolist (case-dir (%collect-invalid root category))
         (%run-invalid case-dir category)))))

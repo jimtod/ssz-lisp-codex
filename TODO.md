@@ -1,7 +1,8 @@
 # TODO
 
-- Add container/progressive container schema definitions for SSZ generic tests and wire `SSZ_GENERIC_SCHEMA`.
-- Add snappy dependency (CL snappy library) to enable serialized vector comparisons.
+- Add container/progressive container schema definitions for SSZ generic tests.
+- Current container schema file: `ssz_generic_schema.yaml` (loaded by default; override with `SSZ_GENERIC_SCHEMA`).
+- Ensure snappy dependency (CL snappy library) is present for serialized vector comparisons.
 - Extend schema parser for nested containers/unions if needed.
 - Consider adding CLI runner for SSZ generic vectors.
 - Optional: add more invalid-case hardening and tests.

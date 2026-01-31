@@ -13,3 +13,6 @@
 [submodule "py-ssz"]
 	path = py-ssz
 	url = https://github.com/ethereum/py-ssz
+[submodule "coalton"]
+	path = coalton
+	url = https://github.com/coalton-lang/coalton

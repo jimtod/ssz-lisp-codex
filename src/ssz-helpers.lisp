@@ -37,6 +37,15 @@
     (setf (aref arr 0) value)
     arr))
 
+(defun %encode-uint (n-bits value)
+  (let* ((byte-len (truncate n-bits 8))
+         (max-value (ash 1 n-bits))
+         (arr (make-array byte-len :element-type '(unsigned-byte 8))))
+    (when (or (< value 0) (>= value max-value))
+      (error "uint out of range for ~a bits: ~a" n-bits value))
+    (dotimes (i byte-len arr)
+      (setf (aref arr i) (ldb (byte 8 (* 8 i)) value)))))
+
 (defun %zero-bytes (n)
   (make-array n :element-type '(unsigned-byte 8) :initial-element 0))
 
